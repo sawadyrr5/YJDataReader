@@ -9,7 +9,7 @@ import lxml.html
 import numpy as np
 import pandas as pd
 
-_SLEEP_TIME = 1.0
+_SLEEP_TIME = 0.5
 _MAX_RETRY_COUNT = 5
 
 
@@ -69,7 +69,7 @@ class YahooJPPriceReader(YahooDailyReader):
                     root = lxml.html.fromstring(html)
                     break
                 except urllib.error.HTTPError:
-                    sleep(10.0)
+                    sleep(_SLEEP_TIME)
             else:
                 raise Exception
 
@@ -158,7 +158,7 @@ class YahooJPSplitReader(YahooDailyReader):
         try:
             html = urllib.request.urlopen(url).read()
         except urllib.error.HTTPError:
-            sleep(3.0)
+            sleep(_SLEEP_TIME)
 
         root = lxml.html.fromstring(html)
 
