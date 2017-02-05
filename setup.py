@@ -8,5 +8,6 @@ setup(
     author='sawadyrr5',
     author_email='riskreturn5@gmail.com',
     url='https://github.com/sawadyrr5/YahooJapanDataReader',
-    packages=['YahooJapanDataReader'],
+    packages=find_packages(),
+    install_requires=['pandas', 'pandas_datareader', 'lxml']
     )
