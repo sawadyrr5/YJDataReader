@@ -15,7 +15,7 @@ _MAX_RETRY_COUNT = 5
 
 class YahooJPPriceReader(YahooDailyReader):
     _url_base = 'history/?code={code}.T&sy={sy}&sm={sm}&sd={sd}&ey={ey}&em={em}&ed={ed}&tm=d&p={p}'
-    _xpath_base = '//*[@id="main"]/div[5]/table//tr//'
+    _xpath_base = '//*[@id="main"]/div[@class="padT12 marB10 clearFix"]/table//tr//'
     _xpath = dict(
         Date=_xpath_base + 'td[1]',
         Open=_xpath_base + 'td[2]',
