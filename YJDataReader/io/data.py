@@ -8,23 +8,51 @@ import urllib.error
 import lxml.html
 import numpy as np
 import pandas as pd
+import pandas.compat as compat
+from pandas import DataFrame
+from YJDataReader.io.locator import SplitLocator, PriceLocator, CorporateLocator, IndependentLocator, ConsolidateLocator
 
 _SLEEP_TIME = 0.5
-_MAX_RETRY_COUNT = 5
+_MAX_RETRY_COUNT = 3
 
 
-class YahooJPPriceReader(YahooDailyReader):
-    _url_base = 'history/?code={code}.T&sy={sy}&sm={sm}&sd={sd}&ey={ey}&em={em}&ed={ed}&tm=d&p={p}'
-    _xpath_base = '//*[@id="main"]/div[@class="padT12 marB10 clearFix"]/table//tr//'
-    _xpath = dict(
-        Date=_xpath_base + 'td[1]',
-        Open=_xpath_base + 'td[2]',
-        High=_xpath_base + 'td[3]',
-        Low=_xpath_base + 'td[4]',
-        Close=_xpath_base + 'td[5]',
-        Volume=_xpath_base + 'td[6]'
-    )
-    _column_order = ['Open', 'High', 'Low', 'Close', 'Volume']
+class YJSplitReader(YahooDailyReader):
+    locator = SplitLocator()
+
+    @property
+    def url(self):
+        return self.locator.url
+
+    def _get_params(self, symbol):
+        params = {
+            'code': symbol
+        }
+        return params
+
+    def _read_one_data(self, url, params):
+        base = self.url + self.locator.url_base
+        url = base.format(**params)
+
+        try:
+            html = urllib.request.urlopen(url).read()
+        except urllib.error.HTTPError:
+            sleep(_SLEEP_TIME)
+
+        root = lxml.html.fromstring(html)
+
+        result = pd.DataFrame()
+        result['Date'] = pd.to_datetime([dt.text for dt in root.xpath(self.locator.xpath['Date'])], format='（%y/%m/%d）')
+        result['Split_Ratio'] = [float(ratio.text.replace('[', '').replace(']', '').split(':')[1]) for ratio in
+                                 root.xpath(self.locator.xpath['Ratio'])]
+        result['Code'] = params['code']
+
+        result = result.set_index(['Code', 'Date'])
+        sleep(_SLEEP_TIME)
+        return result
+
+
+class YJPriceReader(YahooDailyReader):
+    locator = PriceLocator()
 
     def __init__(self, adjust=False, **kwargs):
         super().__init__(**kwargs)
@@ -32,7 +60,7 @@ class YahooJPPriceReader(YahooDailyReader):
 
     @property
     def url(self):
-        return 'http://info.finance.yahoo.co.jp/'
+        return self.locator.url
 
     def read(self):
         # Use _DailyBaseReader's definition
@@ -40,29 +68,29 @@ class YahooJPPriceReader(YahooDailyReader):
         if not df.empty:
             if self.adjust:
                 df = self._adjust_price(df)
-            df = df.loc[:, self._column_order]
+            df = df.loc[:, self.locator.column_order]
         return df
 
     def _get_params(self, symbol):
-        params = dict(
-            code=symbol,
-            sy=self.start.year,
-            sm=self.start.month,
-            sd=self.start.day,
-            ey=self.end.year,
-            em=self.end.month,
-            ed=self.end.day,
-            p=1
-        )
+        params = {
+            'code': symbol,
+            'sy': self.start.year,
+            'sm': self.start.month,
+            'sd': self.start.day,
+            'ey': self.end.year,
+            'em': self.end.month,
+            'ed': self.end.day,
+            'p': 1
+        }
         return params
 
     def _read_one_data(self, url, params):
         results = []
-        base = self.url + self._url_base
+        base = self.url + self.locator.url_base
 
         while True:
             # retrying _MAX_RETRY_COUNT
-            for _ in range(1, _MAX_RETRY_COUNT):
+            for _ in range(0, _MAX_RETRY_COUNT):
                 try:
                     url = base.format(**params)
                     html = urllib.request.urlopen(url).read()
@@ -74,10 +102,11 @@ class YahooJPPriceReader(YahooDailyReader):
                 raise Exception
 
             # make mask-array that row contains price data.
-            row_masks = [p.text.replace(',', '').replace('.', '').isdigit() for p in root.xpath(self._xpath['Open'])]
+            row_masks = [p.text.replace(',', '').replace('.', '').isdigit()
+                         for p in root.xpath(self.locator.xpath['Open'])]
 
             table = pd.DataFrame()
-            for key, xpath in self._xpath.items():
+            for key, xpath in self.locator.xpath.items():
                 # apply mask-array to column "Date" and "Open"
                 if key in ('Date', 'Open'):
                     table[key] = [val.text for val, row_mask in zip(root.xpath(xpath), row_masks) if row_mask]
@@ -110,11 +139,13 @@ class YahooJPPriceReader(YahooDailyReader):
 
     def _adjust_price(self, price):
         # calculate daily split ratio
-        split = DataReader(self.symbols, 'yahoojp_split')
-        split = split.reset_index()
+        split = DataReader(self.symbols, 'yahoojp_split').reset_index()
+
         split['Split_Ratio'] = np.log(split['Split_Ratio'])
 
         dates = price.reset_index().loc[:, ['Code', 'Date']]
+
+        # self merge split_ratio and calculate cumsum split_ratio
         split = pd.merge(dates, split, on='Code', how='outer', suffixes=('', '_y'))
         split = split[split['Date'] < split['Date_y']].groupby(['Code', 'Date']).sum()
         split['Split_Ratio'] = np.exp(split['Split_Ratio'])
@@ -122,103 +153,62 @@ class YahooJPPriceReader(YahooDailyReader):
         result = price.join(split)
         result['Split_Ratio'].fillna(1, inplace=True)
 
-        # adjust ohlcv
+        # adjust price
         for col in result.columns:
-            if col in ('Open', 'High', 'Low', 'Close'):
+            if col in self.locator.column_order:
                 result[col] = result[col] / result['Split_Ratio']
             elif col == 'Volume':
                 result[col] = result[col] * result['Split_Ratio']
 
-        result = result.drop(labels='Split_Ratio', axis=1)
+        result.drop(labels='Split_Ratio', axis=1, inplace=True)
         return result
 
 
-class YahooJPSplitReader(YahooDailyReader):
-    _url_base = 'stocks/chart/?code={code}.T&ct=z&t=ay'
-    _xpath_base = '//*[@class="optionFi marB10"]/table[1]/tr[5]/td/ul//li/'
-    _xpath = dict(
-        Date=_xpath_base + 'span',
-        Ratio=_xpath_base + 'strong'
-    )
+class _YJCorporateReader(YahooDailyReader):
+    locator = CorporateLocator()
 
     @property
     def url(self):
-        return 'http://stocks.finance.yahoo.co.jp/'
+        return self.locator.url
 
     def _get_params(self, symbol):
-        params = dict(
-            code=symbol
-        )
+        params = {
+            'code': symbol
+        }
         return params
 
+    def read(self):
+        """ read data """
+        # If a single symbol, (e.g., '1306')
+        if isinstance(self.symbols, (compat.string_types, int)):
+            df = self._read_one_data(self.url,
+                                     params=self._get_params(self.symbols))
+        # Or multiple symbols, (e.g., ['1306', '7203', '8411'])
+        elif isinstance(self.symbols, DataFrame):
+            # TODO: support multiple symbols.
+            df = self._read_one_data(self.url,
+                                     params=self._get_params(self.symbols[0]))
+        else:
+            # TODO: support multiple symbols.
+            df = self._read_one_data(self.url,
+                                     params=self._get_params(self.symbols[0]))
+        return df
+
+
+class YJProfileReader(_YJCorporateReader):
     def _read_one_data(self, url, params):
-        base = self.url + self._url_base
-        url = base.format(**params)
-
-        try:
-            html = urllib.request.urlopen(url).read()
-        except urllib.error.HTTPError:
-            sleep(_SLEEP_TIME)
-
-        root = lxml.html.fromstring(html)
-
-        result = pd.DataFrame()
-        result['Date'] = pd.to_datetime([dt.text for dt in root.xpath(self._xpath['Date'])], format='（%y/%m/%d）')
-        result['Split_Ratio'] = [float(ratio.text.replace('[', '').replace(']', '').split(':')[1]) for ratio in
-                                 root.xpath(self._xpath['Ratio'])]
-        result['Code'] = params['code']
-
-        result = result.set_index(['Code', 'Date'])
-        sleep(_SLEEP_TIME)
-        return result
-
-
-class _YahooJPCorporateReader(YahooDailyReader):
-    @property
-    def url(self):
-        return 'http://profile.yahoo.co.jp/'
-
-    def _get_params(self, symbol):
-        params = dict(
-            code=symbol
-        )
-        return params
-
-
-class YahooJPProfileReader(_YahooJPCorporateReader):
-    _url_base = 'fundamental/{code}'
-    _xpath_base = '//*[@id="pro_body"]//div//div//div/table/tr[1]/td/table/'
-    _xpath = dict(
-        name='//*[@id="pro_body"]/center//div/h1/strong',
-        specify=_xpath_base + 'tr[1]/td[2]',
-        consolidated_business=_xpath_base + 'tr[2]/td[2]',
-        hq_address=_xpath_base + 'tr[3]/td[2]',
-        telephone=_xpath_base + 'tr[5]/td[2]',
-        sector=_xpath_base + 'tr[6]/td[2]/a',
-        company_name_en=_xpath_base + 'tr[7]/td[2]',
-        ceo_name=_xpath_base + 'tr[8]/td[2]',
-        established_date=_xpath_base + 'tr[9]/td[2]',
-        exchanges=_xpath_base + 'tr[10]/td[2]',
-        ipo_date=_xpath_base + 'tr[11]/td[2]',
-        closing=_xpath_base + 'tr[12]/td[2]',
-        unit_shares=_xpath_base + 'tr[13]/td[2]',
-        employees_independent=_xpath_base + 'tr[14]/td[2]',
-        employees_consolidates=_xpath_base + 'tr[14]/td[4]',
-        average_age=_xpath_base + 'tr[15]/td[2]',
-        average_income=_xpath_base + 'tr[15]/td[4]'
-    )
-
-    def _read_one_data(self, url, params):
-        base = self.url + self._url_base
+        base = self.url + self.locator.url_base
         url = base.format(**params)
 
         html = urllib.request.urlopen(url).read()
         root = lxml.html.fromstring(html)
 
         try:
-            result = {key: root.xpath(xpath)[0].text for key, xpath in self._xpath.items()}
+            pass
+            result = {k: root.xpath(xpath)[0].text
+                      for (k, xpath) in self.locator.xpath.items()}
         except IndexError:
-            raise StockIDError
+            raise SymbolError
 
         result['code'] = self.symbols
         result['company_name_jp'] = result['name'].split('【')[0].replace('(株)', '')
@@ -250,50 +240,86 @@ class YahooJPProfileReader(_YahooJPCorporateReader):
                 return string
 
 
-class YahooJPIndependentReader(_YahooJPCorporateReader):
-    _url_base = 'independent/{code}'
+class YJIndependentReader(_YJCorporateReader):
+    locator = IndependentLocator()
 
     def _read_one_data(self, url, params):
-        base = self.url + self._url_base
+        base = self.url + self.locator.url_base
         url = base.format(**params)
 
         result = pd.read_html(url, header=0)
         result = result[4]
+
+        # TODO: Fix column name "Unnamed: 0"
+
         sleep(_SLEEP_TIME)
         return result
 
 
-class YahooJPConsolidateReader(_YahooJPCorporateReader):
-    _url_base = 'consolidate/{code}'
+class YJConsolidateReader(_YJCorporateReader):
+    locator = ConsolidateLocator()
 
     def _read_one_data(self, url, params):
-        base = self.url + self._url_base
+        base = self.url + self.locator.url_base
         url = base.format(**params)
 
         result = pd.read_html(url, header=0)
         result = result[4]
+
+        # TODO: Fix column name "Unnamed: 0"
+
         sleep(_SLEEP_TIME)
         return result
 
 
-class StockIDError(Exception):
+class SymbolError(Exception):
     pass
 
 
 def DataReader(symbols, data_source=None, start=None, end=None, **kwargs):
     if data_source == 'yahoojp':
         adjust = kwargs.pop('adjust', None)
-        return YahooJPPriceReader(symbols=symbols, start=start, end=end, adjust=adjust, **kwargs).read()
+        return YJPriceReader(symbols=symbols, start=start, end=end, adjust=adjust, **kwargs).read()
     elif data_source == 'yahoojp_split':
-        return YahooJPSplitReader(symbols=symbols, **kwargs).read()
+        return YJSplitReader(symbols=symbols, **kwargs).read()
     elif data_source == 'yahoojp_profile':
-        return YahooJPProfileReader(symbols=symbols, **kwargs).read()
+        return YJProfileReader(symbols=symbols, **kwargs).read()
     elif data_source == 'yahoojp_independent':
-        return YahooJPIndependentReader(symbols=symbols, **kwargs).read()
+        return YJIndependentReader(symbols=symbols, **kwargs).read()
     elif data_source == 'yahoojp_consolidate':
-        return YahooJPConsolidateReader(symbols=symbols, **kwargs).read()
+        return YJConsolidateReader(symbols=symbols, **kwargs).read()
     else:
         return data.DataReader(name=symbols, data_source=data_source, start=start, end=end, **kwargs)
 
 
 DataReader.__doc__ = data.DataReader.__doc__
+
+if __name__ == '__main__':
+    split = DataReader(8411, data_source='yahoojp_split')
+    print(
+        split
+    )
+
+    df = DataReader(8411, data_source='yahoojp', start='2008-12-19', end='2009-01-17')
+    print(
+        df.head(5)
+    )
+
+    df = DataReader(8411, data_source='yahoojp', start='2008-12-19', end='2009-01-17', adjust=True)
+    print(
+        df.head(5)
+    )
+
+    # 3. Download corporate profile data.
+    profile = DataReader(8411, data_source='yahoojp_profile')
+    print(
+        profile
+    )
+
+    # 4.1 Download independent(non-consolidate) account data.
+    independent = DataReader(8411, data_source='yahoojp_independent')
+    print(independent)
+
+    # 4.2 Download consolidate account data.
+    consolidate = DataReader(8411, data_source='yahoojp_consolidate')
+    print(consolidate)
