@@ -14,4 +14,4 @@ pip install git+https://github.com/sawadyrr5/YJDataReader
 ```
 
 ## How to use
-pip install git+https://github.com/sawadyrr5/YJDataReader[example](example.ipynb)
+[example](example.ipynb)
