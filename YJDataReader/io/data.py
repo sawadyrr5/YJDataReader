@@ -16,7 +16,27 @@ _SLEEP_TIME = 0.5
 _MAX_RETRY_COUNT = 3
 
 
-class YJSplitReader(YahooDailyReader):
+class YJDailyReader(YahooDailyReader):
+    def _get_crumb(self, retries):
+        """
+        2018/4/6 depredated対策としてダミークラス追加
+        :param retries:
+        :return:
+        """
+        # Scrape a history page for a valid crumb ID:
+        tu = "https://finance.yahoo.com/quote/{}/history".format(self.symbols)
+        response = self._get_response(tu,
+                                      params=self.params, headers=self.headers)
+        out = str(self._sanitize_response(response))
+        # Matches: {"crumb":"AlphaNumeric"}
+        # rpat = '"CrumbStore":{"crumb":"([^"]+)"}'
+
+        # crumb = re.findall(rpat, out)[0]
+        crumb = out
+        return crumb.encode('ascii').decode('unicode-escape')
+
+
+class YJSplitReader(YJDailyReader):
     locator = SplitLocator()
 
     @property
@@ -51,7 +71,7 @@ class YJSplitReader(YahooDailyReader):
         return result
 
 
-class YJPriceReader(YahooDailyReader):
+class YJPriceReader(YJDailyReader):
     locator = PriceLocator()
 
     def __init__(self, adjust=False, **kwargs):
@@ -164,7 +184,7 @@ class YJPriceReader(YahooDailyReader):
         return result
 
 
-class _YJCorporateReader(YahooDailyReader):
+class _YJCorporateReader(YJDailyReader):
     locator = CorporateLocator()
 
     @property
